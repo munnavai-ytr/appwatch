@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import type { SupabaseClient, User } from '@supabase/supabase-js';
 import { AnimatePresence } from 'motion/react';
 import { AlertCircle, FolderPlus, Loader2, LogOut, Plus, RefreshCw } from 'lucide-react';
-import type { Project } from '@/types/project';
+import type { Incident, Project } from '@/types/project';
 import { formatSimpleError } from '@/lib/supabase';
 import AppWatchLogo from './AppWatchLogo';
 import CommandCenterCard from './CommandCenterCard';
@@ -29,6 +29,7 @@ function getAppDomain(): string {
 
 export default function Dashboard({ supabase, user }: DashboardProps) {
   const [projects, setProjects] = useState<Project[]>([]);
+  const [openIncidents, setOpenIncidents] = useState<Incident[]>([]);
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [showNewForm, setShowNewForm] = useState(false);
@@ -40,24 +41,47 @@ export default function Dashboard({ supabase, user }: DashboardProps) {
     () => 'https://YOUR-APP-DOMAIN'
   );
 
+  const fetchOpenIncidents = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('incidents')
+      .select('id, project_id, title, severity, status, event_count, created_at')
+      .eq('status', 'open');
+
+    if (!error && data) {
+      setOpenIncidents(data as Incident[]);
+    }
+  }, [supabase]);
+
   const fetchProjects = useCallback(async () => {
     setLoading(true);
     setErrorMessage(null);
     try {
-      const { data, error } = await supabase
-        .from('projects')
-        .select('id, user_id, name, site_url, api_key, created_at')
-        .eq('user_id', user.id)
-        .order('created_at', { ascending: false });
+      const [projectsRes, incidentsRes] = await Promise.all([
+        supabase
+          .from('projects')
+          .select('id, user_id, name, site_url, api_key, created_at')
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false }),
+        supabase
+          .from('incidents')
+          .select('id, project_id, title, severity, status, event_count, created_at')
+          .eq('status', 'open'),
+      ]);
 
-      if (error) {
+      if (projectsRes.error) {
         setErrorMessage(
-          formatSimpleError(error, 'Could not load your projects. Please try again.')
+          formatSimpleError(
+            projectsRes.error,
+            'Could not load your projects. Please try again.'
+          )
         );
         return;
       }
 
-      setProjects((data ?? []) as Project[]);
+      setProjects((projectsRes.data ?? []) as Project[]);
+      if (!incidentsRes.error && incidentsRes.data) {
+        setOpenIncidents(incidentsRes.data as Incident[]);
+      }
     } catch (err) {
       setErrorMessage(
         formatSimpleError(err, 'Could not load your projects. Please try again.')
@@ -69,27 +93,56 @@ export default function Dashboard({ supabase, user }: DashboardProps) {
 
   useEffect(() => {
     let active = true;
-    supabase
-      .from('projects')
-      .select('id, user_id, name, site_url, api_key, created_at')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false })
-      .then(({ data, error }) => {
-        if (!active) return;
-        if (error) {
-          setErrorMessage(
-            formatSimpleError(error, 'Could not load your projects. Please try again.')
-          );
-        } else {
-          setProjects((data ?? []) as Project[]);
+
+    Promise.all([
+      supabase
+        .from('projects')
+        .select('id, user_id, name, site_url, api_key, created_at')
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false }),
+      supabase
+        .from('incidents')
+        .select('id, project_id, title, severity, status, event_count, created_at')
+        .eq('status', 'open'),
+    ]).then(([projectsRes, incidentsRes]) => {
+      if (!active) return;
+      if (projectsRes.error) {
+        setErrorMessage(
+          formatSimpleError(
+            projectsRes.error,
+            'Could not load your projects. Please try again.'
+          )
+        );
+      } else {
+        setProjects((projectsRes.data ?? []) as Project[]);
+      }
+      if (!incidentsRes.error && incidentsRes.data) {
+        setOpenIncidents(incidentsRes.data as Incident[]);
+      }
+      setLoading(false);
+    });
+
+    const channel = supabase
+      .channel(`command-center-incidents-${user.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'incidents',
+        },
+        () => {
+          if (!active) return;
+          fetchOpenIncidents();
         }
-        setLoading(false);
-      });
+      )
+      .subscribe();
 
     return () => {
       active = false;
+      supabase.removeChannel(channel);
     };
-  }, [supabase, user.id]);
+  }, [supabase, user.id, fetchOpenIncidents]);
 
   const handleProjectCreated = (newProject: Project) => {
     setProjects((prev) => [newProject, ...prev]);
@@ -174,7 +227,11 @@ export default function Dashboard({ supabase, user }: DashboardProps) {
       >
         {/* Command Center Card */}
         <div id="command-center">
-          <CommandCenterCard projectCount={projects.length} loading={loading} />
+          <CommandCenterCard
+            projectCount={projects.length}
+            openIncidents={openIncidents}
+            loading={loading}
+          />
         </div>
 
         {/* Projects Section */}
@@ -305,8 +362,10 @@ export default function Dashboard({ supabase, user }: DashboardProps) {
                 <ProjectCard
                   key={project.id}
                   project={project}
+                  supabase={supabase}
                   appDomain={appDomain}
                   index={index}
+                  onIncidentActivity={fetchOpenIncidents}
                 />
               ))}
             </div>
