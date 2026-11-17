@@ -17,6 +17,16 @@ export interface Incident {
   status: string;
   event_count: number;
   fingerprint?: string;
+  resolved_at?: string | null;
+  created_at: string;
+}
+
+export interface Check {
+  id: string;
+  project_id: string;
+  is_up: boolean;
+  status_code: number | null;
+  response_ms: number | null;
   created_at: string;
 }
 
