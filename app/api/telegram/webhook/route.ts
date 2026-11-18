@@ -4,6 +4,8 @@ import { getAdminSupabaseClient, sendTelegram } from '@/lib/notify';
 
 export const runtime = 'nodejs';
 
+const DEFAULT_REPLY = 'Open AppWatch and press Connect Telegram to link this chat.';
+
 function isValidWebhookSecret(req: NextRequest): boolean {
   const expected = (process.env.TELEGRAM_WEBHOOK_SECRET || '').trim();
   const provided = (req.headers.get('x-telegram-bot-api-secret-token') || '').trim();
@@ -27,14 +29,27 @@ interface TelegramUpdate {
   };
 }
 
+async function replySafely(chatId: number | string, htmlText: string, context: string) {
+  const ok = await sendTelegram(chatId, htmlText);
+  if (!ok) {
+    console.error(`[telegram-webhook] Failed to send reply (${context})`);
+  }
+}
+
 export async function POST(req: NextRequest) {
   if (!isValidWebhookSecret(req)) {
+    console.error('[telegram-webhook] Rejected request with invalid or missing secret header');
     return NextResponse.json({ error: 'Unauthorized.' }, { status: 401 });
   }
 
   try {
     const update = (await req.json().catch(() => null)) as TelegramUpdate | null;
-    const msg = update?.message || update?.edited_message;
+    if (!update) {
+      console.error('[telegram-webhook] Failed to parse incoming JSON update');
+      return NextResponse.json({ ok: true }, { status: 200 });
+    }
+
+    const msg = update.message || update.edited_message;
     const chatId = msg?.chat?.id;
     const text = typeof msg?.text === 'string' ? msg.text.trim() : '';
 
@@ -42,36 +57,41 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: true }, { status: 200 });
     }
 
-    const supabase = getAdminSupabaseClient();
-    if (!supabase) {
-      return NextResponse.json({ ok: true }, { status: 200 });
-    }
-
     const parts = text.split(/\s+/);
     const command = (parts[0] || '').toLowerCase().split('@')[0];
+    const startCode = command === '/start' ? (parts[1] || '').trim() : '';
 
-    if (command === '/start') {
-      const code = (parts[1] || '').trim();
-      if (!code) {
-        await sendTelegram(
-          chatId,
-          'Please open AppWatch and click <b>Connect Telegram</b> to link your account.'
-        );
+    // Handle "/start <code>"
+    if (command === '/start' && startCode) {
+      const supabase = getAdminSupabaseClient();
+      if (!supabase) {
+        console.error('[telegram-webhook] Server Supabase admin client is not configured');
         return NextResponse.json({ ok: true }, { status: 200 });
       }
 
       const nowIso = new Date().toISOString();
-      const { data: setting } = await supabase
+      const { data: setting, error: lookupError } = await supabase
         .from('notification_settings')
         .select('user_id')
-        .eq('link_code', code)
+        .eq('link_code', startCode)
         .gt('link_code_expires_at', nowIso)
         .maybeSingle();
 
-      if (!setting) {
-        await sendTelegram(
+      if (lookupError) {
+        console.error('[telegram-webhook] Failed to look up link code:', lookupError.message);
+        await replySafely(
           chatId,
-          '⚠️ This link code is invalid or expired. Please click <b>Connect Telegram</b> in AppWatch to try again.'
+          '⚠️ Something went wrong while linking your account. Please try again.',
+          'lookup-error'
+        );
+        return NextResponse.json({ ok: true }, { status: 200 });
+      }
+
+      if (!setting) {
+        await replySafely(
+          chatId,
+          '⚠️ This link code is invalid or expired. Please open AppWatch and press Connect Telegram again.',
+          'invalid-or-expired-code'
         );
         return NextResponse.json({ ok: true }, { status: 200 });
       }
@@ -86,18 +106,33 @@ export async function POST(req: NextRequest) {
         })
         .eq('user_id', setting.user_id);
 
-      if (!updateError) {
-        await sendTelegram(
+      if (updateError) {
+        console.error('[telegram-webhook] Failed to save linked chat:', updateError.message);
+        await replySafely(
           chatId,
-          '✅ AppWatch connected. You will get alerts here.'
+          '⚠️ Could not finish connecting your account. Please try again.',
+          'save-chat-error'
         );
+        return NextResponse.json({ ok: true }, { status: 200 });
       }
 
+      await replySafely(
+        chatId,
+        '✅ AppWatch connected. You will get alerts here.',
+        'connected'
+      );
       return NextResponse.json({ ok: true }, { status: 200 });
     }
 
+    // Handle "/stop"
     if (command === '/stop') {
-      await supabase
+      const supabase = getAdminSupabaseClient();
+      if (!supabase) {
+        console.error('[telegram-webhook] Server Supabase admin client is not configured');
+        return NextResponse.json({ ok: true }, { status: 200 });
+      }
+
+      const { error: stopError } = await supabase
         .from('notification_settings')
         .update({
           telegram_chat_id: null,
@@ -106,12 +141,22 @@ export async function POST(req: NextRequest) {
         })
         .eq('telegram_chat_id', String(chatId));
 
-      await sendTelegram(chatId, '🔕 AppWatch alerts disconnected.');
+      if (stopError) {
+        console.error('[telegram-webhook] Failed to disconnect chat:', stopError.message);
+      }
+
+      await replySafely(chatId, '🔕 AppWatch alerts disconnected.', 'disconnected');
       return NextResponse.json({ ok: true }, { status: 200 });
     }
 
+    // Any other message (including "/start" without a code)
+    await replySafely(chatId, DEFAULT_REPLY, 'default-help');
     return NextResponse.json({ ok: true }, { status: 200 });
-  } catch {
+  } catch (err) {
+    console.error(
+      '[telegram-webhook] Unexpected error:',
+      err instanceof Error ? err.message : 'Unknown error'
+    );
     return NextResponse.json({ ok: true }, { status: 200 });
   }
 }

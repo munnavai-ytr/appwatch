@@ -15,6 +15,7 @@ import {
   Send,
   Sparkles,
   Terminal,
+  Trash2,
 } from 'lucide-react';
 import type { Check, Incident, Project } from '@/types/project';
 import { formatSimpleError } from '@/lib/supabase';
@@ -25,6 +26,7 @@ interface ProjectCardProps {
   appDomain: string;
   index: number;
   onIncidentActivity?: () => void;
+  onDeleted?: (project: Project) => void;
 }
 
 function formatTimeAgo(isoDate: string): string {
@@ -178,6 +180,7 @@ export default function ProjectCard({
   appDomain,
   index,
   onIncidentActivity,
+  onDeleted,
 }: ProjectCardProps) {
   const [copiedKey, setCopiedKey] = useState(false);
   const [copiedScript, setCopiedScript] = useState(false);
@@ -200,6 +203,39 @@ export default function ProjectCard({
     type: 'success' | 'error';
     text: string;
   } | null>(null);
+
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deletingProject, setDeletingProject] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const handleDeleteProject = async () => {
+    if (deletingProject) return;
+    setDeletingProject(true);
+    setDeleteError(null);
+
+    try {
+      const { error } = await supabase
+        .from('projects')
+        .delete()
+        .eq('id', project.id);
+
+      if (error) {
+        setDeleteError(
+          formatSimpleError(error, 'Could not delete this project. Please try again.')
+        );
+        return;
+      }
+
+      setShowDeleteModal(false);
+      onDeleted?.(project);
+    } catch (err) {
+      setDeleteError(
+        formatSimpleError(err, 'Could not delete this project. Please try again.')
+      );
+    } finally {
+      setDeletingProject(false);
+    }
+  };
 
   const apiKeyValue = project.api_key || '';
   const scriptTag = `<script src="${appDomain}/appwatch.js" data-key="${apiKeyValue || 'API_KEY'}"></script>`;
@@ -956,6 +992,101 @@ export default function ProjectCard({
           </ul>
         )}
       </div>
+
+      {/* Footer: Delete project */}
+      <div className="pt-2 border-t border-white/10 flex justify-end">
+        <button
+          type="button"
+          onClick={() => {
+            setDeleteError(null);
+            setShowDeleteModal(true);
+          }}
+          className="inline-flex items-center justify-center gap-1.5 min-h-[36px] sm:min-h-[32px] px-3 py-1 rounded-lg text-xs font-medium text-[#fca5a5] bg-transparent border border-[#ef4444]/35 hover:bg-[#ef4444]/15 hover:border-[#ef4444]/60 transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#ef4444]"
+        >
+          <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+          <span>Delete project</span>
+        </button>
+      </div>
+
+      {/* Delete Confirmation Modal */}
+      <AnimatePresence>
+        {showDeleteModal && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.16 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+            onClick={() => {
+              if (!deletingProject) setShowDeleteModal(false);
+            }}
+          >
+            <motion.div
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby={`delete-project-title-${project.id}`}
+              initial={{ opacity: 0, scale: 0.96, y: 8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 8 }}
+              transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-md rounded-2xl bg-[#0b1120]/95 backdrop-blur-xl border border-[#ef4444]/35 shadow-[0_0_40px_-10px_rgba(239,68,68,0.4)] p-6 space-y-5"
+            >
+              <div className="space-y-2">
+                <h3
+                  id={`delete-project-title-${project.id}`}
+                  className="text-lg font-semibold text-slate-50"
+                >
+                  Delete {project.name}?
+                </h3>
+                <p className="text-sm leading-relaxed text-slate-300">
+                  Delete {project.name}? This permanently removes its API key,
+                  errors, incidents and uptime history.
+                </p>
+              </div>
+
+              {deleteError && (
+                <div
+                  role="alert"
+                  className="flex items-start gap-2 rounded-xl bg-[#ef4444]/10 border border-[#ef4444]/30 px-3.5 py-2.5 text-xs text-[#fca5a5]"
+                >
+                  <AlertCircle
+                    className="h-4 w-4 shrink-0 text-[#ef4444] mt-0.5"
+                    aria-hidden="true"
+                  />
+                  <span>{deleteError}</span>
+                </div>
+              )}
+
+              <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2.5">
+                <button
+                  type="button"
+                  onClick={() => setShowDeleteModal(false)}
+                  disabled={deletingProject}
+                  className="min-h-[42px] rounded-xl border border-white/15 bg-white/5 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-white/10 transition-colors whitespace-nowrap cursor-pointer disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00d4ff]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDeleteProject}
+                  disabled={deletingProject}
+                  className="min-h-[42px] inline-flex items-center justify-center gap-2 rounded-xl bg-[#ef4444] px-4 py-2 text-sm font-semibold text-white shadow-[0_0_24px_-6px_rgba(239,68,68,0.6)] hover:bg-[#dc2626] transition-colors whitespace-nowrap cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#ef4444]"
+                >
+                  {deletingProject ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                      <span>Deleting...</span>
+                    </>
+                  ) : (
+                    <span>Delete</span>
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </motion.article>
   );
 }

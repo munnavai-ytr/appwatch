@@ -3,7 +3,15 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import type { SupabaseClient, User } from '@supabase/supabase-js';
 import { AnimatePresence } from 'motion/react';
-import { AlertCircle, FolderPlus, Loader2, LogOut, Plus, RefreshCw } from 'lucide-react';
+import {
+  AlertCircle,
+  CheckCircle2,
+  FolderPlus,
+  Loader2,
+  LogOut,
+  Plus,
+  RefreshCw,
+} from 'lucide-react';
 import type { Incident, Project } from '@/types/project';
 import { formatSimpleError } from '@/lib/supabase';
 import AppWatchLogo from './AppWatchLogo';
@@ -35,6 +43,7 @@ export default function Dashboard({ supabase, user }: DashboardProps) {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [showNewForm, setShowNewForm] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
+  const [deleteNotice, setDeleteNotice] = useState<string | null>(null);
 
   const appDomain = useSyncExternalStore(
     subscribeNoop,
@@ -148,6 +157,20 @@ export default function Dashboard({ supabase, user }: DashboardProps) {
   const handleProjectCreated = (newProject: Project) => {
     setProjects((prev) => [newProject, ...prev]);
     setShowNewForm(false);
+  };
+
+  const handleProjectDeleted = (deletedProject: Project) => {
+    setProjects((prev) => prev.filter((item) => item.id !== deletedProject.id));
+    setOpenIncidents((prev) =>
+      prev.filter((incident) => incident.project_id !== deletedProject.id)
+    );
+    fetchOpenIncidents();
+    setDeleteNotice(`Project "${deletedProject.name}" was deleted.`);
+    setTimeout(() => {
+      setDeleteNotice((current) =>
+        current === `Project "${deletedProject.name}" was deleted.` ? null : current
+      );
+    }, 3500);
   };
 
   const handleSignOut = async () => {
@@ -275,6 +298,20 @@ export default function Dashboard({ supabase, user }: DashboardProps) {
             )}
           </AnimatePresence>
 
+          {/* Project Delete Success Message */}
+          {deleteNotice && (
+            <div
+              role="status"
+              className="rounded-xl bg-[#22c55e]/10 border border-[#22c55e]/30 px-4 py-3 text-sm text-[#86efac] flex items-center gap-2.5"
+            >
+              <CheckCircle2
+                className="h-4 w-4 shrink-0 text-[#22c55e]"
+                aria-hidden="true"
+              />
+              <span>{deleteNotice}</span>
+            </div>
+          )}
+
           {/* Error State */}
           {errorMessage && (
             <div
@@ -370,6 +407,7 @@ export default function Dashboard({ supabase, user }: DashboardProps) {
                   appDomain={appDomain}
                   index={index}
                   onIncidentActivity={fetchOpenIncidents}
+                  onDeleted={handleProjectDeleted}
                 />
               ))}
             </div>
