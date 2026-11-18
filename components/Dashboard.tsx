@@ -8,6 +8,7 @@ import type { Incident, Project } from '@/types/project';
 import { formatSimpleError } from '@/lib/supabase';
 import AppWatchLogo from './AppWatchLogo';
 import CommandCenterCard from './CommandCenterCard';
+import AlertsCard from './AlertsCard';
 import NewProjectForm from './NewProjectForm';
 import ProjectCard from './ProjectCard';
 
@@ -233,6 +234,9 @@ export default function Dashboard({ supabase, user }: DashboardProps) {
             loading={loading}
           />
         </div>
+
+        {/* Telegram Alerts Card */}
+        <AlertsCard supabase={supabase} userId={user.id} />
 
         {/* Projects Section */}
         <section id="projects" aria-labelledby="projects-heading" className="space-y-5">

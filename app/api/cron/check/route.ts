@@ -3,15 +3,20 @@ import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { NextRequest, NextResponse } from 'next/server';
+import { notifyIncident, type NotifyIncident } from '@/lib/notify';
 
 export const runtime = 'nodejs';
 
 const CHECK_TIMEOUT_MS = 8_000;
+const MAX_REDIRECTS = 3;
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const FOURTEEN_DAYS_MS = 14 * 24 * 60 * 60 * 1000;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 interface ProjectTarget {
   id: string;
+  user_id: string;
+  name: string;
   site_url: string;
 }
 
@@ -141,39 +146,66 @@ function getAdminSupabaseClient(): SupabaseClient | null {
 
 async function checkSingleProject(
   supabase: SupabaseClient,
-  project: ProjectTarget
+  project: ProjectTarget,
+  origin: string
 ): Promise<boolean> {
   let isUp = false;
   let statusCode: number | null = null;
   let responseMs = 0;
 
-  const safeToFetch = await isSafePublicUrl(project.site_url);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CHECK_TIMEOUT_MS);
+  const startedAt = Date.now();
 
-  if (safeToFetch) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), CHECK_TIMEOUT_MS);
-    const startedAt = Date.now();
+  try {
+    let currentUrl = project.site_url;
 
-    try {
-      const res = await fetch(project.site_url, {
+    for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+      const safeToFetch = await isSafePublicUrl(currentUrl);
+      if (!safeToFetch) {
+        statusCode = null;
+        isUp = false;
+        break;
+      }
+
+      const res = await fetch(currentUrl, {
         method: 'GET',
-        redirect: 'follow',
+        redirect: 'manual',
         signal: controller.signal,
         cache: 'no-store',
         headers: {
           'User-Agent': 'AppWatch-UptimeMonitor/1.0',
         },
       });
+
       responseMs = Math.max(0, Date.now() - startedAt);
       statusCode = res.status;
+
+      if (REDIRECT_STATUSES.has(res.status)) {
+        const location = res.headers.get('location');
+        if (!location || hop === MAX_REDIRECTS) {
+          isUp = false;
+          break;
+        }
+        try {
+          currentUrl = new URL(location, currentUrl).toString();
+        } catch {
+          statusCode = null;
+          isUp = false;
+          break;
+        }
+        continue;
+      }
+
       isUp = res.status >= 200 && res.status <= 399;
-    } catch {
-      responseMs = Math.max(0, Date.now() - startedAt);
-      statusCode = null;
-      isUp = false;
-    } finally {
-      clearTimeout(timer);
+      break;
     }
+  } catch {
+    responseMs = Math.max(0, Date.now() - startedAt);
+    statusCode = null;
+    isUp = false;
+  } finally {
+    clearTimeout(timer);
   }
 
   // Record check result
@@ -209,18 +241,33 @@ async function checkSingleProject(
         .maybeSingle();
 
       if (!existingIncident) {
-        await supabase.from('incidents').insert({
-          project_id: project.id,
-          fingerprint: 'uptime-down',
-          title: 'Website is down',
-          severity: 'high',
-          status: 'open',
-          event_count: 1,
-        });
+        const { data: insertedIncident } = await supabase
+          .from('incidents')
+          .insert({
+            project_id: project.id,
+            fingerprint: 'uptime-down',
+            title: 'Website is down',
+            severity: 'high',
+            status: 'open',
+            event_count: 1,
+          })
+          .select(
+            'id, project_id, title, severity, event_count, notified_severity, notified_at, resolve_notified'
+          )
+          .single();
+
+        if (insertedIncident) {
+          await notifyIncident(
+            project,
+            insertedIncident as NotifyIncident,
+            'opened',
+            origin
+          );
+        }
       }
     }
   } else {
-    await supabase
+    const { data: resolvedIncidents } = await supabase
       .from('incidents')
       .update({
         status: 'resolved',
@@ -228,7 +275,18 @@ async function checkSingleProject(
       })
       .eq('project_id', project.id)
       .eq('fingerprint', 'uptime-down')
-      .eq('status', 'open');
+      .eq('status', 'open')
+      .select(
+        'id, project_id, title, severity, event_count, notified_severity, notified_at, resolve_notified'
+      );
+
+    if (Array.isArray(resolvedIncidents) && resolvedIncidents.length > 0) {
+      await Promise.allSettled(
+        resolvedIncidents.map((incident) =>
+          notifyIncident(project, incident as NotifyIncident, 'resolved', origin)
+        )
+      );
+    }
   }
 
   return true;
@@ -250,7 +308,7 @@ async function runCronChecks(req: NextRequest) {
   try {
     const { data: projects, error: projectsError } = await supabase
       .from('projects')
-      .select('id, site_url')
+      .select('id, user_id, name, site_url')
       .not('site_url', 'is', null);
 
     if (projectsError) {
@@ -265,8 +323,10 @@ async function runCronChecks(req: NextRequest) {
         typeof p.site_url === 'string' && p.site_url.trim().length > 0
     );
 
+    const origin = req.nextUrl.origin;
+
     const results = await Promise.allSettled(
-      targets.map((project) => checkSingleProject(supabase, project))
+      targets.map((project) => checkSingleProject(supabase, project, origin))
     );
 
     const checked = results.filter((r) => r.status === 'fulfilled').length;

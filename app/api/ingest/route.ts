@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
 import { NextRequest, NextResponse } from 'next/server';
+import { notifyIncident, severityRank, type NotifyIncident } from '@/lib/notify';
 
 export const runtime = 'nodejs';
 
@@ -94,7 +95,7 @@ export async function POST(req: NextRequest) {
     // Look up project by api_key
     const { data: project, error: projectError } = await supabase
       .from('projects')
-      .select('id')
+      .select('id, user_id, name, site_url')
       .eq('api_key', apiKey)
       .maybeSingle();
 
@@ -159,7 +160,9 @@ export async function POST(req: NextRequest) {
     // Upsert open incident for project_id + fingerprint
     const { data: existingIncident, error: incidentLookupError } = await supabase
       .from('incidents')
-      .select('id, event_count')
+      .select(
+        'id, project_id, title, severity, event_count, notified_severity, notified_at, resolve_notified'
+      )
       .eq('project_id', project.id)
       .eq('fingerprint', fingerprint)
       .eq('status', 'open')
@@ -169,9 +172,13 @@ export async function POST(req: NextRequest) {
       return jsonResponse({ error: 'Could not check incidents right now.' }, 500);
     }
 
+    const origin = req.nextUrl.origin;
+
     if (existingIncident) {
       const nextCount = (existingIncident.event_count ?? 1) + 1;
       const nextSeverity = severityForCount(nextCount);
+      const escalated =
+        severityRank(nextSeverity) > severityRank(existingIncident.severity);
 
       const { error: updateIncidentError } = await supabase
         .from('incidents')
@@ -184,18 +191,42 @@ export async function POST(req: NextRequest) {
       if (updateIncidentError) {
         return jsonResponse({ error: 'Could not update incident right now.' }, 500);
       }
+
+      if (escalated) {
+        const updatedIncident: NotifyIncident = {
+          ...(existingIncident as NotifyIncident),
+          event_count: nextCount,
+          severity: nextSeverity,
+        };
+        await notifyIncident(project, updatedIncident, 'escalated', origin);
+      }
     } else {
-      const { error: insertIncidentError } = await supabase.from('incidents').insert({
-        project_id: project.id,
-        fingerprint,
-        title: message.slice(0, 120),
-        severity: 'low',
-        status: 'open',
-        event_count: 1,
-      });
+      const { data: insertedIncident, error: insertIncidentError } = await supabase
+        .from('incidents')
+        .insert({
+          project_id: project.id,
+          fingerprint,
+          title: message.slice(0, 120),
+          severity: 'low',
+          status: 'open',
+          event_count: 1,
+        })
+        .select(
+          'id, project_id, title, severity, event_count, notified_severity, notified_at, resolve_notified'
+        )
+        .single();
 
       if (insertIncidentError) {
         return jsonResponse({ error: 'Could not create incident right now.' }, 500);
+      }
+
+      if (insertedIncident) {
+        await notifyIncident(
+          project,
+          insertedIncident as NotifyIncident,
+          'opened',
+          origin
+        );
       }
     }
 
