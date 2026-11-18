@@ -2,15 +2,19 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import type { SupabaseClient } from '@supabase/supabase-js';
-import { motion } from 'motion/react';
+import { AnimatePresence, motion } from 'motion/react';
 import {
   AlertCircle,
   Check as CheckIcon,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Copy,
   ExternalLink,
   Loader2,
   Send,
+  Sparkles,
+  Terminal,
 } from 'lucide-react';
 import type { Check, Incident, Project } from '@/types/project';
 import { formatSimpleError } from '@/lib/supabase';
@@ -83,7 +87,6 @@ function ResponseSparkline({
   const height = 28;
   const padY = 4;
 
-  // Checks arrive newest-first; reverse to plot oldest -> newest
   const ordered = [...checks].reverse();
   const values = ordered.map((c) =>
     typeof c.response_ms === 'number' && Number.isFinite(c.response_ms)
@@ -166,6 +169,9 @@ function ResponseSparkline({
   );
 }
 
+const INCIDENT_COLUMNS =
+  'id, project_id, title, severity, status, event_count, fingerprint, ai_summary, ai_fix, created_at';
+
 export default function ProjectCard({
   project,
   supabase,
@@ -183,6 +189,11 @@ export default function ProjectCard({
   const [loadingIncidents, setLoadingIncidents] = useState(true);
   const [incidentsError, setIncidentsError] = useState<string | null>(null);
   const [resolvingId, setResolvingId] = useState<string | null>(null);
+
+  const [analyzingId, setAnalyzingId] = useState<string | null>(null);
+  const [analysisErrors, setAnalysisErrors] = useState<Record<string, string>>({});
+  const [collapsedPanels, setCollapsedPanels] = useState<Record<string, boolean>>({});
+  const [freshlyAnalyzedIds, setFreshlyAnalyzedIds] = useState<Record<string, boolean>>({});
 
   const [sendingTest, setSendingTest] = useState(false);
   const [testFeedback, setTestFeedback] = useState<{
@@ -210,7 +221,7 @@ export default function ProjectCard({
   const loadIncidents = useCallback(async () => {
     const { data, error } = await supabase
       .from('incidents')
-      .select('id, project_id, title, severity, status, event_count, created_at')
+      .select(INCIDENT_COLUMNS)
       .eq('project_id', project.id)
       .eq('status', 'open')
       .order('created_at', { ascending: false })
@@ -239,7 +250,7 @@ export default function ProjectCard({
         .limit(30),
       supabase
         .from('incidents')
-        .select('id, project_id, title, severity, status, event_count, created_at')
+        .select(INCIDENT_COLUMNS)
         .eq('project_id', project.id)
         .eq('status', 'open')
         .order('created_at', { ascending: false })
@@ -343,6 +354,92 @@ export default function ProjectCard({
     } finally {
       setResolvingId(null);
     }
+  };
+
+  const handleExplainWithAI = async (incident: Incident) => {
+    if (analyzingId) return;
+
+    // If already analyzed, expand the panel
+    if (incident.ai_summary) {
+      setCollapsedPanels((prev) => ({ ...prev, [incident.id]: false }));
+      return;
+    }
+
+    setAnalyzingId(incident.id);
+    setAnalysisErrors((prev) => {
+      const next = { ...prev };
+      delete next[incident.id];
+      return next;
+    });
+
+    try {
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData.session?.access_token;
+
+      if (!accessToken) {
+        setAnalysisErrors((prev) => ({
+          ...prev,
+          [incident.id]: 'Please sign in again to use AI analysis.',
+        }));
+        return;
+      }
+
+      const response = await fetch('/api/ai/analyze', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({ incident_id: incident.id }),
+      });
+
+      const result = (await response.json().catch(() => ({}))) as {
+        ai_summary?: string;
+        ai_fix?: string;
+        cached?: boolean;
+        error?: string;
+      };
+
+      if (!response.ok || !result.ai_summary) {
+        setAnalysisErrors((prev) => ({
+          ...prev,
+          [incident.id]:
+            result.error || 'AI limit reached, please try again later',
+        }));
+        return;
+      }
+
+      setIncidents((prev) =>
+        prev.map((item) =>
+          item.id === incident.id
+            ? {
+                ...item,
+                ai_summary: result.ai_summary ?? item.ai_summary,
+                ai_fix: result.ai_fix ?? item.ai_fix,
+              }
+            : item
+        )
+      );
+
+      if (!result.cached) {
+        setFreshlyAnalyzedIds((prev) => ({ ...prev, [incident.id]: true }));
+      }
+      setCollapsedPanels((prev) => ({ ...prev, [incident.id]: false }));
+    } catch {
+      setAnalysisErrors((prev) => ({
+        ...prev,
+        [incident.id]: 'AI limit reached, please try again later',
+      }));
+    } finally {
+      setAnalyzingId(null);
+    }
+  };
+
+  const toggleAnalysisPanel = (incidentId: string) => {
+    setCollapsedPanels((prev) => ({
+      ...prev,
+      [incidentId]: !prev[incidentId],
+    }));
   };
 
   const handleSendTestEvent = async () => {
@@ -658,66 +755,201 @@ export default function ProjectCard({
             {incidents.map((incident) => {
               const sev = getSeverityStyle(incident.severity);
               const isResolving = resolvingId === incident.id;
+              const isAnalyzing = analyzingId === incident.id;
+              const hasAnalysis = Boolean(incident.ai_summary);
+              const isPanelOpen = !collapsedPanels[incident.id];
+              const aiError = analysisErrors[incident.id];
+              const isSavedLabel = hasAnalysis && !freshlyAnalyzedIds[incident.id];
+
               return (
-                <li
-                  key={incident.id}
-                  className="px-3.5 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 min-w-0"
-                >
-                  <div className="min-w-0 flex-1">
-                    <p
-                      className="text-xs sm:text-sm font-medium text-slate-100 truncate"
-                      title={incident.title}
-                    >
-                      {incident.title}
-                    </p>
-                    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-400">
-                      <span className={`font-medium ${sev.textColor}`}>
-                        {sev.label}
+                <li key={incident.id} className="px-3.5 py-3 space-y-2.5 min-w-0">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 min-w-0">
+                    <div className="min-w-0 flex-1">
+                      <p
+                        className="text-xs sm:text-sm font-medium text-slate-100 truncate"
+                        title={incident.title}
+                      >
+                        {incident.title}
+                      </p>
+                      <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-400">
+                        <span className={`font-medium ${sev.textColor}`}>
+                          {sev.label}
+                        </span>
+                        <span aria-hidden="true" className="text-slate-600">
+                          ·
+                        </span>
+                        <span className="tabular-nums whitespace-nowrap">
+                          {formatTimeAgo(incident.created_at)}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <span
+                        className={`inline-flex items-center justify-center rounded-md border px-2 py-0.5 font-mono text-xs font-medium tabular-nums shrink-0 ${sev.countBg}`}
+                        title={`${incident.event_count} occurrences`}
+                      >
+                        {incident.event_count}
                       </span>
-                      <span aria-hidden="true" className="text-slate-600">
-                        ·
-                      </span>
-                      <span className="tabular-nums whitespace-nowrap">
-                        {formatTimeAgo(incident.created_at)}
-                      </span>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          hasAnalysis
+                            ? toggleAnalysisPanel(incident.id)
+                            : handleExplainWithAI(incident)
+                        }
+                        disabled={isAnalyzing}
+                        className="inline-flex items-center justify-center gap-1.5 min-h-[34px] sm:min-h-[30px] px-2.5 py-1 rounded-lg text-xs font-medium text-[#00d4ff] bg-[#00d4ff]/10 border border-[#00d4ff]/25 hover:bg-[#00d4ff]/20 transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00d4ff]"
+                      >
+                        <Sparkles className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>
+                          {hasAnalysis
+                            ? isPanelOpen
+                              ? 'Hide AI'
+                              : 'Explain with AI'
+                            : 'Explain with AI'}
+                        </span>
+                      </button>
+
+                      {incident.status === 'open' && (
+                        <button
+                          type="button"
+                          onClick={() => handleMarkResolved(incident.id)}
+                          disabled={isResolving}
+                          className="inline-flex items-center justify-center gap-1.5 min-h-[34px] sm:min-h-[30px] px-2.5 py-1 rounded-lg text-xs font-medium text-slate-200 bg-white/5 border border-white/10 hover:bg-[#22c55e]/15 hover:text-[#22c55e] hover:border-[#22c55e]/35 transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00d4ff]"
+                        >
+                          {isResolving ? (
+                            <>
+                              <Loader2
+                                className="h-3.5 w-3.5 animate-spin"
+                                aria-hidden="true"
+                              />
+                              <span>Resolving...</span>
+                            </>
+                          ) : (
+                            <>
+                              <CheckCircle2
+                                className="h-3.5 w-3.5"
+                                aria-hidden="true"
+                              />
+                              <span>Mark resolved</span>
+                            </>
+                          )}
+                        </button>
+                      )}
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between sm:justify-end gap-2 shrink-0">
-                    <span
-                      className={`inline-flex items-center justify-center rounded-md border px-2 py-0.5 font-mono text-xs font-medium tabular-nums shrink-0 ${sev.countBg}`}
-                      title={`${incident.event_count} occurrences`}
+                  {/* Terminal-style AI Loading Box */}
+                  {isAnalyzing && (
+                    <div
+                      role="status"
+                      aria-live="polite"
+                      className="rounded-xl bg-[#03060c] border border-[#22c55e]/30 px-3.5 py-3 font-mono text-xs text-[#22c55e] space-y-1 shadow-[0_0_24px_-10px_rgba(34,197,94,0.35)]"
                     >
-                      {incident.event_count}
-                    </span>
+                      <div className="flex items-center gap-2">
+                        <Terminal className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                        <span>
+                          {incident.fingerprint === 'uptime-down'
+                            ? 'analyzing recent uptime checks...'
+                            : 'analyzing stack trace...'}
+                        </span>
+                      </div>
+                      <p className="text-[#22c55e]/75 pl-5 animate-pulse">
+                        preparing beginner-friendly explanation...
+                      </p>
+                    </div>
+                  )}
 
-                    {incident.status === 'open' && (
+                  {/* AI Error Feedback */}
+                  {aiError && !isAnalyzing && (
+                    <div
+                      role="alert"
+                      className="flex items-start gap-2 rounded-xl bg-[#ef4444]/10 border border-[#ef4444]/25 px-3 py-2 text-xs text-[#fca5a5]"
+                    >
+                      <AlertCircle
+                        className="h-3.5 w-3.5 shrink-0 text-[#ef4444] mt-0.5"
+                        aria-hidden="true"
+                      />
+                      <span>{aiError}</span>
+                    </div>
+                  )}
+
+                  {/* Collapsible Glass AI Analysis Panel */}
+                  {hasAnalysis && !isAnalyzing && (
+                    <div className="rounded-xl bg-[#0b1120]/80 backdrop-blur-md border border-[#00d4ff]/25 overflow-hidden">
                       <button
                         type="button"
-                        onClick={() => handleMarkResolved(incident.id)}
-                        disabled={isResolving}
-                        className="inline-flex items-center justify-center gap-1.5 min-h-[34px] sm:min-h-[30px] px-2.5 py-1 rounded-lg text-xs font-medium text-slate-200 bg-white/5 border border-white/10 hover:bg-[#22c55e]/15 hover:text-[#22c55e] hover:border-[#22c55e]/35 transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00d4ff]"
+                        onClick={() => toggleAnalysisPanel(incident.id)}
+                        aria-expanded={isPanelOpen}
+                        className="w-full min-h-[38px] px-3.5 py-2 flex items-center justify-between gap-2 text-left hover:bg-white/5 transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#00d4ff]"
                       >
-                        {isResolving ? (
-                          <>
-                            <Loader2
-                              className="h-3.5 w-3.5 animate-spin"
-                              aria-hidden="true"
-                            />
-                            <span>Resolving...</span>
-                          </>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <Sparkles
+                            className="h-3.5 w-3.5 text-[#00d4ff] shrink-0"
+                            aria-hidden="true"
+                          />
+                          <span className="text-xs font-semibold text-slate-100 whitespace-nowrap">
+                            AI Explanation
+                          </span>
+                          {isSavedLabel && (
+                            <>
+                              <span aria-hidden="true" className="text-slate-600">
+                                ·
+                              </span>
+                              <span className="text-xs text-slate-400 whitespace-nowrap">
+                                Saved analysis
+                              </span>
+                            </>
+                          )}
+                        </div>
+                        {isPanelOpen ? (
+                          <ChevronUp
+                            className="h-4 w-4 text-slate-400 shrink-0"
+                            aria-hidden="true"
+                          />
                         ) : (
-                          <>
-                            <CheckCircle2
-                              className="h-3.5 w-3.5"
-                              aria-hidden="true"
-                            />
-                            <span>Mark resolved</span>
-                          </>
+                          <ChevronDown
+                            className="h-4 w-4 text-slate-400 shrink-0"
+                            aria-hidden="true"
+                          />
                         )}
                       </button>
-                    )}
-                  </div>
+
+                      <AnimatePresence initial={false}>
+                        {isPanelOpen && (
+                          <motion.div
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            exit={{ opacity: 0 }}
+                            transition={{ duration: 0.18 }}
+                            className="border-t border-white/10 px-3.5 py-3 space-y-3 text-xs sm:text-[13px] leading-relaxed text-slate-200"
+                          >
+                            <div className="space-y-1">
+                              <p className="text-[11px] font-semibold tracking-wide text-[#00d4ff]">
+                                Summary
+                              </p>
+                              <p className="whitespace-pre-line text-slate-200">
+                                {incident.ai_summary}
+                              </p>
+                            </div>
+
+                            {incident.ai_fix && (
+                              <div className="space-y-1 border-t border-white/10 pt-2.5">
+                                <p className="text-[11px] font-semibold tracking-wide text-[#22c55e]">
+                                  Fix Steps
+                                </p>
+                                <p className="whitespace-pre-line text-slate-200">
+                                  {incident.ai_fix}
+                                </p>
+                              </div>
+                            )}
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  )}
                 </li>
               );
             })}

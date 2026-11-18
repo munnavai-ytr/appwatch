@@ -17,6 +17,8 @@ export interface Incident {
   status: string;
   event_count: number;
   fingerprint?: string;
+  ai_summary?: string | null;
+  ai_fix?: string | null;
   resolved_at?: string | null;
   created_at: string;
 }
