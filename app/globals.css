@@ -21,3 +21,65 @@
     overflow-x: hidden;
   }
 }
+
+@keyframes aw-radar-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes aw-scan-sweep {
+  0% {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  20% {
+    opacity: 0.7;
+  }
+  80% {
+    opacity: 0.7;
+  }
+  100% {
+    transform: translateY(400%);
+    opacity: 0;
+  }
+}
+
+@keyframes aw-cursor-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.aw-radar-spin {
+  animation: aw-radar-spin 6s linear infinite;
+}
+
+.aw-radar-spin-fast {
+  animation: aw-radar-spin 2.4s linear infinite;
+}
+
+.aw-scan-sweep {
+  animation: aw-scan-sweep 2.6s ease-in-out infinite;
+}
+
+.aw-cursor-blink {
+  animation: aw-cursor-blink 1.05s steps(1, end) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aw-radar-spin,
+  .aw-radar-spin-fast,
+  .aw-scan-sweep,
+  .aw-cursor-blink {
+    animation: none !important;
+  }
+}

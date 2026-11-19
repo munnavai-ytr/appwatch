@@ -252,7 +252,8 @@ export default function Dashboard({ supabase, user }: DashboardProps) {
         {/* Command Center Card */}
         <div id="command-center">
           <CommandCenterCard
-            projectCount={projects.length}
+            supabase={supabase}
+            projects={projects}
             openIncidents={openIncidents}
             loading={loading}
           />

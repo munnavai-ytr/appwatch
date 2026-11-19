@@ -32,6 +32,20 @@ export interface Check {
   created_at: string;
 }
 
+export interface AppEvent {
+  id: string;
+  project_id: string;
+  message: string;
+  stack?: string | null;
+  file?: string | null;
+  line?: number | null;
+  column?: number | null;
+  page_url?: string | null;
+  user_agent?: string | null;
+  fingerprint?: string | null;
+  created_at: string;
+}
+
 export interface SupabaseEnvConfig {
   url: string;
   anonKey: string;
